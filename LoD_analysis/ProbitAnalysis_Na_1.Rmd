@@ -1,0 +1,224 @@
+---
+title: "Probit analysis for LoD determination in PCR assays"
+author: "Jonathan Reed"
+date: "2023-12-28"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(gt)
+library(scales)
+
+```
+
+
+```{r}
+lod.model <- function(dat) {
+  ## PURPOSE: Limit of detection (LoD) in PCR assays is the level of analyte
+  ## that is expected to be detected 95% of the time.  This is determined by
+  ## repeated measurement (10-20 times) at levels of analyte both above and
+  ## below the expected LoD.  A probit model can be fitted against these data to
+  ## estimate the level analyte that can be detected 95%.  Measurements should
+  ## include levels of analyte both above and below the LoD.
+  ## ----------------------------------------------------------------------
+  ## ARGUMENT:
+  ##   dat: a data frame with three columns "copies", "success", "failure"
+  ##        "copies" is the expected copy Levels.
+  ##        "success" is the Number of positive Results.
+  ##        "failure" is the Number of negative Results.
+  ## ----------------------------------------------------------------------
+  ## RETURN: fitting results
+  ## ----------------------------------------------------------------------
+  ## Adapated from: http://frisby5.blogspot.com/2016/02/probit-model-for-limit-of-detection.html
+  
+  ## Per "CLSI EP17A2E" Guidance, apply default recommendation:
+  ##   1. Remove Zero Predictor Values.
+  ##   2. Appply "log10" transformation on predictors.
+  ##   3. Use Probit Model
+  ##   4. Report 95% LOD (concentration level)
+  
+  # ## Samples set for troubleshooting: #################################
+  # dat <-
+  #   tibble(
+  #     copies = c(200000, 20000, 2000, 200, 100, 50, 25, 12.5, 0),
+  #     success = c(9, 9, 9, 9, 8, 6, 2, 3, 0),
+  #     failure = c(0, 0, 0, 0, 1, 3, 7, 6, 9)
+  #   )
+  #####################################################################
+ 
+  
+  # remove 0 levels in "copies" since will do "log10" transform on predictor.
+  dat <- dat %>% filter(copies > 0)
+  
+  #log10 transformation on predictors and probit model
+  r <-
+    glm(
+      cbind(success, failure) ~ log10(copies),
+      data = dat,
+      family = binomial(link = "probit")
+    )
+  
+  
+  #create of list of copy amounts to feed the probit model for generating fit and upr and lwr confidence
+  grid <- 10 ^ seq(0, log10(max(dat %>% select(copies))), length.out = 1000)
+  
+  #Using the probit model (r) predict the dependent value at various values as defined by grid
+  preds <- predict(r, newdata = data.frame(copies = grid), type = "link",se.fit = TRUE)
+  
+  #generate datasets of the upper, lower, and fit based on preds
+  se <- 1.96 * preds$se.fit
+  uprdat <- tibble(grid, upr = unlist(r$family$linkinv(preds$fit + se)))
+  lwrdat <- tibble(grid, lwr = unlist(r$family$linkinv(preds$fit - se)))
+  fitdat <- tibble(grid, fit = unlist(r$family$linkinv(preds$fit)))
+  
+  #get prob. est for 50%, 60%, 70%, 80%, 90%, 95% detection
+  ce <- coef(r)
+  probtest = c(0.5, 0.6, 0.7, 0.8, 0.9, 0.95)
+  copiesResult <- 10 ^ ((r$family$linkfun(probtest) - ce[1]) / ce[2])
+  
+  #return results
+  invisible(
+    list(
+      probtest = probtest,
+      copiesResult = copiesResult,
+      fitdat = fitdat,
+      uprdat = uprdat,
+      lwrdat = lwrdat
+    )
+  )
+}
+
+#table formatting function
+table_format <- function(data) {
+  data %>%
+    tab_options(
+      column_labels.border.top.color = "black",
+      column_labels.border.top.width = px(3),
+      column_labels.border.bottom.color = "black",
+      column_labels.font.size = 12,
+      table_body.hlines.color = "white",
+      table.border.bottom.color = "black",
+      table.border.bottom.width = px(3),
+      table.border.top.color = "black",
+      table.border.top.width = px(3)
+    ) %>%
+    tab_style(cell_text(weight = "bold"),
+              location = cells_column_labels(columns = everything()))
+  
+}
+
+
+
+```
+
+#LOD analysis
+
+```{r, fig.width=2.5,fig.height=2.5}
+
+
+dat <- tribble(
+  ~copies, ~success, ~failure,
+  1, 0, 10,
+  10,3, 7,
+  100,9,1,
+  1000,10,0,
+  10000,10,0)
+  
+
+LODResults = lod.model(dat)
+
+
+ProbDetTable <- tibble(probtest = LODResults$probtest, copiesResult = LODResults$copiesResult) %>%
+  gt() %>%
+  table_format() %>%
+  tab_options(data_row.padding = 1) %>%
+  cols_label(probtest = "probability of detection",
+             copiesResult = html("copies")) %>%
+  cols_align(align = "center", columns = everything()) %>%
+  cols_width(probtest ~ px(100), copiesResult ~ px(100)) %>%
+  fmt_number(
+    columns = c(copiesResult),
+    decimals = 1,
+    suffixing = FALSE
+  )
+
+LODplot <- ggplot() +
+  geom_point(
+    data = dat,
+    mapping = aes(x = log10(copies), y = success / (success + failure)),
+    size = 2,
+    shape = 1,
+    stroke = 1
+  ) +
+  geom_line(data = LODResults$fitdat, aes(x = log10(grid), y = fit)) +
+  geom_line(data = LODResults$uprdat,
+            aes(x = log10(grid), y = upr),
+            linetype = "dashed") +
+  geom_line(data = LODResults$lwrdat,
+            aes(x = log10(grid), y = lwr),
+            linetype = "dashed") +
+  geom_hline(yintercept = 0.95,
+             linetype = "dashed",
+             color = "red") +
+  geom_vline(
+    xintercept = log10(LODResults$copiesResult[6]),
+    linetype = "dashed",
+    color = "red"
+  ) +
+  coord_fixed(clip = "off") +
+  scale_x_continuous(
+    name = str_wrap("expected copies",
+                    width = 24),
+    labels = scales::math_format(10 ^ .x),
+    expand = c(0, 0),
+    limits = c(0, 6)
+  ) +
+  scale_y_continuous(
+    name = "proportion of detected samples",
+    expand = c(0, 0),
+    limits = c(0, 1.1),
+    breaks = seq(0, 1.0, by = 0.2)
+  ) +
+  theme(
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    axis.text.y = element_text(margin = margin(0, 5, 0, 0), size = 9),
+    axis.text.x = element_text(margin = margin(10, 0, 0, 0), size = 9),
+    axis.title = element_text(size = 9),
+    axis.line = element_line(),
+    panel.border = element_blank(),
+    panel.background = element_blank(),
+    plot.margin = unit(c(0.15, 0.25, 0, 0), "cm"),
+    aspect.ratio = 0.9
+  ) +
+  annotation_logticks(sides = "b", outside = TRUE) +
+  annotate(
+    geom = "text",
+    size = 3.5,
+    x = log10(200),
+    y = 0.9,
+    label = "95% detected",
+    hjust = "left"
+  ) +
+  annotate(
+    geom = "text",
+    size = 3.5,
+    x = log10(LODResults$copiesResult[6]) + 0.2,
+    y = 0.025,
+    label = paste(round(LODResults$copiesResult[6], 0), " copies"),
+    hjust = "left",
+    angle = 90
+  )
+
+LODplot
+ProbDetTable
+
+ggsave("../plots/HIVDNA_probit.pdf", dpi = 300, plot = LODplot, width = 2.5, height = 2.5, units = "in")
+
+
+```
